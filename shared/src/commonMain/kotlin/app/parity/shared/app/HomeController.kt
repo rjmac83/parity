@@ -31,6 +31,7 @@ import app.parity.shared.data.PreviousSighting
 import app.parity.shared.data.ProductEntity
 import app.parity.shared.data.Settings
 import app.parity.shared.translate.AiEndpoint
+import app.parity.shared.translate.AiPreset
 import app.parity.shared.util.now
 import com.ionspin.kotlin.bignum.decimal.BigDecimal
 import kotlinx.coroutines.Dispatchers
@@ -826,7 +827,7 @@ class HomeController(private val graph: AppGraph) {
                     graph.messages.show("Couldn't photograph this label. The reading is unchanged.")
                     return@launch
                 }
-                val reading = withTimeoutOrNull(12_000) {
+                val reading = withTimeoutOrNull(if (AiPreset.fromName(settings.aiPreset) == AiPreset.GEMINI) 50_000 else 12_000) {
                     runCatching {
                         graph.tagInterpreter.read(
                             endpoint, key, shot.jpeg, settings.country,

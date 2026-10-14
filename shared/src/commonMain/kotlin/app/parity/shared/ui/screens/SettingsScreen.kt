@@ -173,6 +173,7 @@ fun SettingsScreen(graph: AppGraph, settings: Settings) {
                             when (preset) {
                                 AiPreset.SPACEXAI -> "Grok, at api.x.ai. Model grok-4.7."
                                 AiPreset.OPENAI -> "ChatGPT, at api.openai.com."
+                                AiPreset.GEMINI -> "Gemini Interactions API. Model gemini-3.8-flash. Paste the key only."
                                 AiPreset.CUSTOM -> "Any service that speaks the OpenAI chat format."
                             },
                             style = Parity.type.caption, color = c.textSecondary,

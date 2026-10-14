@@ -7,13 +7,16 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.plugins.timeout
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import kotlin.io.encoding.Base64
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -24,11 +27,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
-/** Which OpenAI-compatible service reads a label when the shopper taps AI. */
+/** Which service reads a label when the shopper taps AI. */
 enum class AiPreset(val label: String) {
     /** Grok, served at api.x.ai. The provider name is SpaceXAI; the endpoint is xAI's. */
     SPACEXAI("SpaceXAI"),
     OPENAI("OpenAI"),
+    /** Google's Interactions API, not the OpenAI-compatible address. */
+    GEMINI("Gemini"),
     CUSTOM("Custom"),
     ;
 
@@ -37,12 +42,26 @@ enum class AiPreset(val label: String) {
     }
 }
 
-/** Where one chat-completions request goes. [lowReasoning] is only for SpaceXAI's reasoning models. */
-data class AiEndpoint(val baseUrl: String, val model: String, val lowReasoning: Boolean) {
+/** How [AiEndpoint] is spoken. Gemini does not use chat completions. */
+enum class AiWire { OPENAI_CHAT, GEMINI_INTERACTIONS }
+
+/** Where one reading request goes. [lowReasoning] is only for SpaceXAI's reasoning models. */
+data class AiEndpoint(
+    val baseUrl: String,
+    val model: String,
+    val lowReasoning: Boolean,
+    val wire: AiWire = AiWire.OPENAI_CHAT,
+) {
     companion object {
         fun resolve(settings: Settings): AiEndpoint? = when (AiPreset.fromName(settings.aiPreset)) {
             AiPreset.SPACEXAI -> AiEndpoint("https://api.x.ai/v1", "grok-4.7", lowReasoning = true)
             AiPreset.OPENAI -> AiEndpoint("https://api.openai.com/v1", settings.aiModel?.trim()?.ifEmpty { null } ?: "gpt-4o", lowReasoning = false)
+            AiPreset.GEMINI -> AiEndpoint(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini-3.8-flash",
+                lowReasoning = false,
+                wire = AiWire.GEMINI_INTERACTIONS,
+            )
             AiPreset.CUSTOM -> {
                 val url = baseUrl(settings.aiBaseUrl) ?: return null
                 val model = settings.aiModel?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -65,7 +84,7 @@ data class AiEndpoint(val baseUrl: String, val model: String, val lowReasoning: 
 data class AiReachability(val ok: Boolean, val detail: String)
 
 /**
- * One OpenAI-compatible chat completion, used for SpaceXAI (api.x.ai), OpenAI, or a custom base URL.
+ * One reading request: OpenAI-style chat for SpaceXAI, OpenAI, and Custom, or Gemini's Interactions API.
  * A label crop is sent only when the shopper taps AI. A failure leaves the on-device reading as it was.
  */
 class TagInterpreter(http: HttpClient? = null) {
@@ -80,11 +99,19 @@ class TagInterpreter(http: HttpClient? = null) {
 
     /** A text-only request, so Settings can check the key without sending a label. */
     suspend fun ping(endpoint: AiEndpoint, apiKey: String): AiReachability {
-        val response = post(endpoint, apiKey, messages(text = "Reply with the single word ok.")) ?: return AiReachability(false, "Couldn't reach that service")
+        val response = when (endpoint.wire) {
+            AiWire.OPENAI_CHAT -> post(endpoint, apiKey, messages(text = "Reply with the single word ok."))
+            AiWire.GEMINI_INTERACTIONS -> postGemini(endpoint, apiKey, JsonPrimitive("Reply with the single word ok."))
+        } ?: return AiReachability(false, "Couldn't reach that service")
         return when (response.status) {
-            in 200..299 -> AiReachability(true, "Connected")
+            in 200..299 -> if (endpoint.wire == AiWire.GEMINI_INTERACTIONS && interactionText(response.body) == null) {
+                AiReachability(false, "Gemini answered, but not with text")
+            } else {
+                AiReachability(true, "Connected")
+            }
             401, 403 -> AiReachability(false, "That key was rejected")
             429 -> AiReachability(false, "That service is limiting this key right now")
+            503 -> AiReachability(false, "That model is overloaded (503). Try again in a few minutes.")
             else -> AiReachability(false, "Couldn't reach that service (${response.status})")
         }
     }
@@ -102,11 +129,65 @@ class TagInterpreter(http: HttpClient? = null) {
         language: String?,
     ): AiTagReading? {
         val prompt = prompt(country, currency, language)
-        val image = "data:image/jpeg;base64,${Base64.Default.encode(jpeg)}"
-        val response = post(endpoint, apiKey, messages(prompt, image)) ?: return null
+        val response = when (endpoint.wire) {
+            AiWire.OPENAI_CHAT -> {
+                val image = "data:image/jpeg;base64,${Base64.Default.encode(jpeg)}"
+                post(endpoint, apiKey, messages(prompt, image))
+            }
+            AiWire.GEMINI_INTERACTIONS -> postGemini(endpoint, apiKey, geminiInput(prompt, jpeg))
+        } ?: return null
         if (!response.ok) return null
-        val text = messageText(response.body) ?: return null
+        val text = when (endpoint.wire) {
+            AiWire.OPENAI_CHAT -> messageText(response.body)
+            AiWire.GEMINI_INTERACTIONS -> interactionText(response.body)
+        } ?: return null
         return parse(text)
+    }
+
+    /**
+     * Google's Interactions API: POST /v1beta/interactions with the key in x-goog-api-key.
+     * A 503 is the model being overloaded, so this tries twice more before giving up.
+     */
+    private suspend fun postGemini(endpoint: AiEndpoint, apiKey: String, input: JsonElement): HttpReply? {
+        val payload = buildJsonObject {
+            put("model", endpoint.model)
+            put("input", input)
+        }
+        var last: HttpReply? = null
+        repeat(3) { attempt ->
+            val call = runCatching {
+                client.post("${endpoint.baseUrl}/interactions") {
+                    header("x-goog-api-key", apiKey)
+                    header("Api-Revision", "2026-05-20")
+                    contentType(ContentType.Application.Json)
+                    timeout {
+                        requestTimeoutMillis = 45_000
+                        connectTimeoutMillis = 8_000
+                        socketTimeoutMillis = 45_000
+                    }
+                    setBody(payload.toString())
+                }
+            }.getOrNull() ?: return last
+            val body = runCatching { call.bodyAsText() }.getOrNull()
+            val reply = HttpReply(call.status.value, body)
+            last = reply
+            if (reply.status != 503 || attempt == 2) return reply
+            delay(2_000L * (attempt + 1))
+        }
+        return last
+    }
+
+    /** Image bytes are raw base64, which is what Interactions expects, not a data URL. */
+    private fun geminiInput(prompt: String, jpeg: ByteArray): JsonArray = buildJsonArray {
+        add(buildJsonObject {
+            put("type", "text")
+            put("text", prompt)
+        })
+        add(buildJsonObject {
+            put("type", "image")
+            put("mime_type", "image/jpeg")
+            put("data", Base64.Default.encode(jpeg))
+        })
     }
 
     private suspend fun post(endpoint: AiEndpoint, apiKey: String, messages: JsonArray): HttpReply? {
@@ -175,6 +256,27 @@ class TagInterpreter(http: HttpClient? = null) {
             else -> null
         }
         return text?.takeIf { it.isNotBlank() }
+    }
+
+    /** Text from the model's own steps. The SDK's output_text is the same words when present. */
+    private fun interactionText(body: String?): String? {
+        val root = body?.let { runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull() } ?: return null
+        root["output_text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { return it }
+        val steps = (root["steps"] as? JsonArray) ?: (root["outputs"] as? JsonArray) ?: return null
+        val text = steps.mapNotNull { step ->
+            val obj = runCatching { step.jsonObject }.getOrNull() ?: return@mapNotNull null
+            if (obj["type"]?.jsonPrimitive?.contentOrNull != "model_output") return@mapNotNull null
+            when (val content = obj["content"]) {
+                is JsonPrimitive -> content.contentOrNull
+                is JsonArray -> content.joinToString("") { part ->
+                    val piece = runCatching { part.jsonObject }.getOrNull() ?: return@joinToString ""
+                    if (piece["type"]?.jsonPrimitive?.contentOrNull != "text") ""
+                    else piece["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                }
+                else -> null
+            }
+        }.joinToString("")
+        return text.takeIf { it.isNotBlank() }
     }
 
     private fun parse(raw: String): AiTagReading? {
