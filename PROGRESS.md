@@ -163,7 +163,7 @@ Alternative over USB: `adb install -r androidApp/build/outputs/apk/release/andro
 
 ## Releases (GitHub)
 
-- Public repo: https://github.com/Orthobro83/parity. Releases carry the per-ABI APKs.
+- Public repo: https://github.com/rjmac83/parity. Releases carry the per-ABI APKs.
 - Release builds are signed with `signing/parity-release.p12`; its passwords are in
   `keystore.properties`. **Both are git-ignored and exist only on this Mac, so back them up**
   (e.g. in a password manager). Without them, no update can ever be installed over an existing

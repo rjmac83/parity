@@ -9,7 +9,7 @@ scan something you've seen before, it shows whether your money now buys more or 
 time.
 
 > **Beta · Android only.** Download the APK from
-> [Releases](https://github.com/Orthobro83/parity/releases). An iPhone version is planned.
+> [Releases](https://github.com/rjmac83/parity/releases). An iPhone version is planned.
 
 <p align="center">
   <img src="docs/screenshots/scan-georgian.png" width="200" alt="A Georgian price tag on a supermarket shelf converted to US dollars, with the product name translated">
@@ -96,7 +96,7 @@ six providers, from daily (free, no key) to minute-level (CoinGecko).
 
 ## Install
 
-1. Open [Releases](https://github.com/Orthobro83/parity/releases) on your phone and download:
+1. Open [Releases](https://github.com/rjmac83/parity/releases) on your phone and download:
    - `Parity-…-arm64-v8a.apk` for almost every phone from the last several years, or
    - `Parity-…-armeabi-v7a.apk` for older 32-bit phones.
 2. Open the file. If Android asks, allow **Install unknown apps** for your browser.
@@ -122,7 +122,7 @@ Requirements: JDK 17 or newer (Android Studio's bundled one works) and the Andro
 platform 37.
 
 ```bash
-git clone https://github.com/Orthobro83/parity.git
+git clone https://github.com/rjmac83/parity.git
 cd parity
 echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties   # your SDK path
 ./gradlew :core:jvmTest                  # unit tests
@@ -147,4 +147,4 @@ Commercial use needs permission.
 Bundled third-party files keep their own licenses: Source Sans 3 (SIL Open Font License) and
 Tesseract language data (Apache 2.0). See [third_party/](third_party).
 
-Bug reports and ideas are welcome in [Issues](https://github.com/Orthobro83/parity/issues).
+Bug reports and ideas are welcome in [Issues](https://github.com/rjmac83/parity/issues).
